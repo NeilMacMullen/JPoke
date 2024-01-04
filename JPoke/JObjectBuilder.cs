@@ -1,9 +1,6 @@
-﻿using System.ComponentModel;
-using System.ComponentModel.Design;
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization.Metadata;
-using System.Xml.Linq;
 
 #pragma warning disable CS8600 // Converting null literal or possible null value to non-nullable type.
 #pragma warning disable CS8603 // Possible null reference return.
@@ -11,6 +8,19 @@ using System.Xml.Linq;
 #pragma warning disable CS8602 // Dereference of a possibly null reference.
 
 namespace JPoke;
+
+public enum MatchType
+{
+    MissingObjectProperty,
+    Object,
+    IncompleteArray,
+    IncompatibleType,
+    RanOutOfPath
+}
+
+public readonly record struct GetResult(MatchType Match, JObjectBuilder ResultOrParent, JPath Remaining);
+
+public readonly record struct JOptions(bool ShouldCreate);
 
 public class JObjectBuilder
 {
@@ -26,7 +36,16 @@ public class JObjectBuilder
         return new JObjectBuilder(node);
     }
 
-    public JObjectBuilder Set(string path, object value) => Set2(_root, PathParser.Parse(path), value);
+    /// <summary>
+    ///     Creates a new builder from valid Json text
+    /// </summary>
+    public static JObjectBuilder FromJsonText(string text)
+    {
+        var node = JsonNode.Parse(text);
+        return new JObjectBuilder(node);
+    }
+
+    public JObjectBuilder Set(string path, object value) => Set(PathParser.Parse(path), value);
 
     private static JsonArray EnsureContainerHasArrayAt(JsonObject container,
         string arrayName)
@@ -63,140 +82,159 @@ public class JObjectBuilder
     }
 
 
-    public readonly record struct MatchResult(MatchType Result, JsonNode Node,JPath unmatched);
-
-
-    public enum MatchType
+    public GetResult GetNextForArray(JPath path, JOptions options)
     {
-        MissingObjectProperty,
-        Object,
-        IncompleteArray,
-        IncompatibleType,
-        RanOutOfPath
-    }
-    public MatchResult Descend(JsonNode currentParent, JPath path)
-    {
-        if (path.Elements.Length == 0)
-            return new MatchResult(MatchType.RanOutOfPath, currentParent,JPath.Empty);
+        if (path.Length == 0)
+            throw new InvalidOperationException();
         var top = path.Elements.First();
-        
-        switch (currentParent)
+        if (!top.IsIndex)
+            throw new InvalidOperationException();
+
+        if (_root is JsonArray arr)
         {
-            case JsonObject obj:
-                if (!obj.TryGetPropertyValue(top.Name, out var p))
-                    return new MatchResult(MatchType.MissingObjectProperty, obj,path);
-                //we have property
-                if (path.IsTerminal)
-                {
-                    return top.IsIndex 
-                        ? Descend(p,path) //special case for indexers   
-                        : new MatchResult(MatchType.Object, p,path);
-                }
-
-                return Descend(p, path.Descend());
-            case JsonArray arr:
-                if (!top.IsIndex)
-                    return new MatchResult(MatchType.IncompatibleType, currentParent,path);
-                if (top.Index.EffectiveIndex(arr.Count)>=arr.Count)
-                    return new MatchResult(MatchType.IncompleteArray, arr,path);
-                var indexedItem = arr.ElementAt(top.Index.EffectiveIndex(arr.Count));
-                return path.IsTerminal 
-                    ? new MatchResult(MatchType.Object, indexedItem,path) 
-                    : Descend(indexedItem, path.Descend());
-
-            default:
-                return new MatchResult(MatchType.IncompatibleType, currentParent,path);
+            if (top.Index.EffectiveIndex(arr.Count) >= arr.Count)
+                return new GetResult(MatchType.IncompleteArray, this, path);
+            var obj = arr.ElementAt(top.Index.EffectiveIndex(arr.Count));
+            var builder = new JObjectBuilder(obj);
+            return builder.GetNextForObject(path.Descend(), options);
         }
+
+        throw new InvalidOperationException();
     }
 
-    public JObjectBuilder Set2(JsonNode node,JPath  jpath, object value)
+    public GetResult Search(string pathstr)
     {
-        int n = 10;
-        while (n-- > 0)
-        {
-            var match = Descend(node, jpath);
-         
-            var firstUnmatched = match.unmatched.Elements.First();
-            switch (match.Result)
-            {
-                case MatchType.MissingObjectProperty:
-                    var parent = match.Node as JsonObject;
-                    if (match.unmatched.IsTerminal)
-                    {
-                        parent.Add(firstUnmatched.Name, ObjectToJsonNode(value));
-                        return this;
-                    }
-                    else
-                    {
-                        if (firstUnmatched.IsIndex)
-                            EnsureContainerHasArrayAt(parent, firstUnmatched.Name);
-                        else
-                            EnsureContainerHasObjectAt(parent, firstUnmatched.Name);
-                    }
+        var path = PathParser.Parse(pathstr);
+        var options = new JOptions(false);
+        return GetNextForObject(path, options);
+    }
 
-                    break;
-                case MatchType.Object:
-                    throw new InvalidOperationException("object");
-                    break;
-                case MatchType.IncompleteArray:
-                    throw new InvalidOperationException("incomplete array");
-                    break;
-                case MatchType.IncompatibleType:
-                    throw new InvalidOperationException("incompatibleType");
-                    break;
-                case MatchType.RanOutOfPath:
-                    throw new InvalidOperationException("ran out of path");
-                    break;
-                default:
-                    Console.WriteLine($"unhandled case {match.Result}");
-                    break;
+
+    public GetResult GetNextForObject(JPath path, JOptions options)
+    {
+        if (path.Length == 0)
+            return new GetResult(MatchType.Object, this, path);
+        var top = path.Elements.First();
+        if (_root is JsonObject obj)
+        {
+            if (obj.ContainsKey(top.Name))
+            {
+                var builder = new JObjectBuilder(obj[top.Name]);
+
+                //note - we don't traverse the path for indexers
+                //TODO - if we want to support multi-dimensional arrays
+                //we will need a way of specifying and descending array levels
+                return top.IsIndex
+                    ? builder.GetNextForArray(path, options)
+                    : builder.GetNextForObject(path.Descend(), options);
             }
+
+            return new GetResult(MatchType.MissingObjectProperty, this, path);
         }
 
-        return this;
+        //otherwise something has gone wrong - we've descended to a terminal
+        //element but still have a path to traverse...
+        throw new InvalidOperationException();
     }
-    
-    public MatchResult Match(string path)
+
+
+    /// <summary>
+    ///     Returns true if the supplied path is populated
+    /// </summary>
+    public bool Exists(string pathstr)
+    {
+        var jpath = PathParser.Parse(pathstr);
+        var options = new JOptions(false);
+
+        var (matchType, parent, jPath) = GetNextForObject(jpath, options);
+        return matchType == MatchType.Object;
+    }
+
+    /// <summary>
+    ///     Attempts to remove an object or element
+    /// </summary>
+    /// <remarks>
+    ///     Can't be used for array elements
+    /// </remarks>
+    public void Remove(string path)
     {
         var jpath = PathParser.Parse(path);
-        return Descend(_root, jpath);
-    }
+        if (jpath.Top.IsIndex)
+            throw new InvalidOperationException("can't remove array element");
+        if (path.Length == 0)
+            throw new InvalidOperationException("can't remove root node");
+        var parentPath = jpath.LeafParent();
 
-    public JObjectBuilder Set(JsonNode current, JPath path, object value)
-    {
-        var container = current as JsonObject;
-        var element = path.Elements.First();
-        
-        if (!path.IsTerminal)
+        var options = new JOptions(false);
+        var (matchType, parent, _) = GetNextForObject(parentPath, options);
+        if (matchType == MatchType.Object)
         {
-            if (element.IsIndex)
+            if (parent.ReferenceNode() is JsonObject obj)
             {
-                var array = EnsureContainerHasArrayAt(container, element.Name);
-                var childContainer = new JsonObject();
-                SetValueInArray(array, element.Index, () => null, childContainer);
-                Set(childContainer, path.Descend(), value);
+                obj.Remove(jpath.Leaf.Name);
             }
             else
-            {
-                var child = EnsureContainerHasObjectAt(container, element.Name);
-                Set(child, path.Descend(), value);
-            }
-
-            return this;
+                throw new InvalidOperationException("Attempt to remove item from non-container");
         }
+    }
 
-        var newValue = ObjectToJsonNode(value);
-       
-        //if is terminal
-        if (element.IsIndex)
+    public JObjectBuilder Set(JPath jpath, object value)
+    {
+        var options = new JOptions(false);
+        var n = 100;
+        while (n-- > 0)
         {
-            var array = EnsureContainerHasArrayAt(container, element.Name);
-            SetValueInArray(array, element.Index, () => null, newValue);
+            var (matchType, parent, jPath) = GetNextForObject(jpath, options);
+
+            switch (matchType)
+            {
+                case MatchType.Object:
+                    //success
+                    return parent;
+
+                case MatchType.MissingObjectProperty:
+                    if (jPath.IsTerminal && !jPath.Top.IsIndex)
+
+                        return parent.DirectSet(jPath, value);
+
+
+                    var parentObject = parent.ReferenceNode() as JsonObject;
+                    if (jPath.Top.IsIndex)
+                        EnsureContainerHasArrayAt(parentObject, jPath.Top.Name);
+                    else
+                        EnsureContainerHasObjectAt(parentObject, jPath.Top.Name);
+
+                    break;
+
+                case MatchType.IncompleteArray:
+                    if (jPath.IsTerminal)
+                    {
+                        SetValueInArray(parent.ReferenceNode() as JsonArray, jPath.Top.Index,
+                            () => null, ObjectToJsonNode(value));
+                        return this;
+                    }
+                    //add an empty object - TODO - this ignores the case of nested arrays
+
+                    SetValueInArray(parent.ReferenceNode() as JsonArray, jPath.Top.Index,
+                        () => null, new JsonObject());
+                    break;
+                default:
+                    throw new NotImplementedException($"unhandled case {matchType}");
+            }
         }
-        else
-            container.Add(element.Name, newValue);
+
+        throw new InvalidOperationException("Nesting too deep");
 
         return this;
+    }
+
+
+    private JObjectBuilder DirectSet(JPath matchRemaining, object value)
+    {
+        var objs = _root as JsonObject;
+        var vBuilder = ObjectToJsonNode(value);
+        objs.Add(matchRemaining.Top.Name, vBuilder);
+        return new JObjectBuilder(vBuilder);
     }
 
     private static JsonNode ObjectToJsonNode(object obj)
@@ -211,4 +249,34 @@ public class JObjectBuilder
         {
             WriteIndented = true, TypeInfoResolver = new DefaultJsonTypeInfoResolver()
         });
+
+    public T GetAsValue<T>()
+    {
+        if (_root is JsonValue el && el.TryGetValue<T>(out var res))
+            return res;
+        throw new InvalidOperationException($"Can't read {_root} as {typeof(T).Name}");
+    }
+
+    /// <summary>
+    ///     Returns a _reference to the current JsonNode held by the builder
+    /// </summary>
+    /// <remarks>
+    ///     Use with care - the contents of the node may change unpredictably
+    ///     if the builder continues to be used
+    /// </remarks>
+    public JsonNode ReferenceNode() => _root;
+
+    /// <summary>
+    ///     Returns a clone of the current contents of the builder
+    /// </summary>
+    /// <remarks>
+    ///     It's safe to use this since it can't change
+    /// </remarks>
+    public JsonNode CloneNode() => JsonNode.Parse(Serialize());
+
+    /// <summary>
+    ///     Returns a clone of the current builder
+    /// </summary>
+    /// <returns></returns>
+    public JObjectBuilder Clone() => new(CloneNode());
 }

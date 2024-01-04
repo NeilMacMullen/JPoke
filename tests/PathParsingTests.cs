@@ -9,6 +9,14 @@ namespace JPokeTests;
 public class PathParsingTests
 {
     [TestMethod]
+    public void EmptyPathReturnsNoElements()
+    {
+        var p = PathParser.Parse("");
+        p.Length.Should().Be(0);
+        p.IsTerminal.Should().BeTrue();
+    }
+
+    [TestMethod]
     public void SimpleElementIsParsed()
     {
         var p = PathParser.Parse("abc");

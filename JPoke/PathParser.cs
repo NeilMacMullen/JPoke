@@ -25,6 +25,8 @@ public class PathParser
 
     public static JPath Parse(string path)
     {
+        if (path.Trim().Length == 0)
+            return JPath.Empty;
         var elements = path.Split(".").ToArray();
         return new JPath(
             elements.Select(ParseElement).ToImmutableArray());
