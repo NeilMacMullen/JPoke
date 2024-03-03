@@ -6,6 +6,48 @@ namespace JPokeTests;
 public class BuilderSetTests : TestHelpers
 {
     [TestMethod]
+    public void RootCanBeSetToObject()
+    {
+        var b = JObjectBuilder.CreateEmpty();
+        var o = new { abc = 123 };
+        b.Set("", o);
+        var expected = o;
+        Check(b, expected);
+    }
+
+    [TestMethod]
+    public void RootCanBeSetToValue()
+    {
+        var b = JObjectBuilder.CreateEmpty();
+        var o = 123;
+        b.Set("", o);
+        var expected = o;
+        Check(b, expected);
+    }
+
+    [TestMethod]
+    public void RootCanBeSetToArray()
+    {
+        var b = JObjectBuilder.CreateEmpty();
+        var o = new[] { 123 };
+        b.Set("", o);
+        var expected = o;
+        Check(b, expected);
+    }
+
+
+    [TestMethod]
+    public void RootArrayCanBeSet()
+    {
+        var b = JObjectBuilder.CreateEmpty();
+        var o = 123;
+        b.Set("[0]", o);
+        var expected = new[] { o };
+        Check(b, expected);
+    }
+
+
+    [TestMethod]
     public void SimpleElementIsParsed()
     {
         var b = JObjectBuilder.CreateEmpty();

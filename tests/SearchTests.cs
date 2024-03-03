@@ -53,7 +53,7 @@ public class SearchTests
 
         successfulSearch
             .ResultOrParent
-            .ReferenceNode()
+            .ToJsonNode()
             .Should().BeOfType<JsonArray>();
 
         var successfulIndexSearch = builder.Search("A[1]");
@@ -63,7 +63,7 @@ public class SearchTests
 
         var failingSearch = builder.Search("A[5]");
         failingSearch.Match.Should().Be(MatchType.IncompleteArray);
-        failingSearch.ResultOrParent.ReferenceNode().Should().BeOfType<JsonArray>();
+        failingSearch.ResultOrParent.ToJsonNode().Should().BeOfType<JsonArray>();
         failingSearch.Remaining.Top.Name.Should().Be("A");
     }
 }

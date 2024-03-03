@@ -5,7 +5,17 @@ namespace JPoke;
 public readonly record struct JPath(ImmutableArray<JPathElement> Elements)
 {
     public static readonly JPath Empty = new(ImmutableArray<JPathElement>.Empty);
+
+    /// <summary>
+    ///     Indicates that the path is terminal, i.e. that we can't descend further into it.
+    /// </summary>
     public bool IsTerminal => Elements.Length <= 1;
+
+    /// <summary>
+    ///     Indicates that the path is "root", ie we have no name or index
+    /// </summary>
+    public bool IsRoot => Elements.Length == 0;
+
     public int Length => Elements.Length;
     public JPathElement Top => Length > 0 ? Elements[0] : JPathElement.Empty;
     public JPathElement Leaf => Elements.Last();

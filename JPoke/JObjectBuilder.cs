@@ -2,7 +2,6 @@
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization.Metadata;
 
-#pragma warning disable CS8600 // Converting null literal or possible null value to non-nullable type.
 #pragma warning disable CS8603 // Possible null reference return.
 #pragma warning disable CS8604 // Possible null reference argument.
 #pragma warning disable CS8602 // Dereference of a possibly null reference.
@@ -24,7 +23,7 @@ public readonly record struct JOptions(bool ShouldCreate);
 
 public class JObjectBuilder
 {
-    private readonly JsonNode _root;
+    private JsonNode _root;
 
     private JObjectBuilder(JsonNode root) => _root = root;
 
@@ -45,7 +44,11 @@ public class JObjectBuilder
         return new JObjectBuilder(node);
     }
 
-    public JObjectBuilder Set(string path, object value) => Set(PathParser.Parse(path), value);
+    public JObjectBuilder Set(string path, object value)
+    {
+        Set(PathParser.Parse(path), value);
+        return this;
+    }
 
     private static JsonArray EnsureContainerHasArrayAt(JsonObject container,
         string arrayName)
@@ -57,20 +60,20 @@ public class JObjectBuilder
         }
 
         var arr = new JsonArray();
+        container.Remove(arrayName);
         container.Add(arrayName, arr);
         return arr;
     }
 
-    private static JsonObject EnsureContainerHasObjectAt(JsonObject container, string path)
+    private static void EnsureContainerHasObjectAt(JsonObject container, string path)
     {
-        if (container.TryGetPropertyValue(path, out var existingNode))
-        {
-            return existingNode as JsonObject ?? new JsonObject();
-        }
+        if (container.TryGetPropertyValue(path, out var existingNode)
+            && existingNode is JsonObject)
+            return;
 
         var child = new JsonObject();
+        container.Remove(path);
         container.Add(path, child);
-        return child;
     }
 
     private static void SetValueInArray<T>(JsonArray arr, JPathIndex index, Func<T> fill, T value)
@@ -109,6 +112,13 @@ public class JObjectBuilder
         return GetNextForObject(path, options);
     }
 
+    public T Get<T>(string pathstr, T fallbackValue)
+    {
+        var r = Search(pathstr);
+        if (r.Match == MatchType.Object)
+            return r.ResultOrParent.GetAsValue<T>();
+        return fallbackValue;
+    }
 
     public GetResult GetNextForObject(JPath path, JOptions options)
     {
@@ -119,17 +129,26 @@ public class JObjectBuilder
         {
             if (obj.ContainsKey(top.Name))
             {
-                var builder = new JObjectBuilder(obj[top.Name]);
+                var container = obj[top.Name];
+                if (container != null)
+                {
+                    var builder = new JObjectBuilder(container);
 
-                //note - we don't traverse the path for indexers
-                //TODO - if we want to support multi-dimensional arrays
-                //we will need a way of specifying and descending array levels
-                return top.IsIndex
-                    ? builder.GetNextForArray(path, options)
-                    : builder.GetNextForObject(path.Descend(), options);
+                    //note - we don't traverse the path for indexers
+                    //TODO - if we want to support multi-dimensional arrays
+                    //we will need a way of specifying and descending array levels
+                    return top.IsIndex
+                        ? builder.GetNextForArray(path, options)
+                        : builder.GetNextForObject(path.Descend(), options);
+                }
             }
 
             return new GetResult(MatchType.MissingObjectProperty, this, path);
+        }
+
+        if (_root is JsonArray arr)
+        {
+            return new GetResult(MatchType.Object, this, path);
         }
 
         //otherwise something has gone wrong - we've descended to a terminal
@@ -156,7 +175,7 @@ public class JObjectBuilder
     /// <remarks>
     ///     Can't be used for array elements
     /// </remarks>
-    public void Remove(string path)
+    public JObjectBuilder Remove(string path)
     {
         var jpath = PathParser.Parse(path);
         if (jpath.Top.IsIndex)
@@ -176,19 +195,33 @@ public class JObjectBuilder
             else
                 throw new InvalidOperationException("Attempt to remove item from non-container");
         }
+
+        return this;
     }
 
-    public JObjectBuilder Set(JPath jpath, object value)
+    private JObjectBuilder Set(JPath jpath, object value)
     {
         var options = new JOptions(false);
-        var n = 100;
-        while (n-- > 0)
+        var maxStructureDepth = 100;
+        while (maxStructureDepth-- > 0)
         {
             var (matchType, parent, jPath) = GetNextForObject(jpath, options);
 
             switch (matchType)
             {
                 case MatchType.Object:
+                    if (jPath.IsTerminal)
+                    {
+                        var o = ObjectToJsonNode(value);
+                        if (_root is JsonArray arr)
+                        {
+                            //TODO - Needs proper indexer
+                            arr.Add(o);
+                        }
+                        else
+                            parent._root = o;
+                    }
+
                     //success
                     return parent;
 
@@ -200,7 +233,16 @@ public class JObjectBuilder
 
                     var parentObject = parent.ReferenceNode() as JsonObject;
                     if (jPath.Top.IsIndex)
-                        EnsureContainerHasArrayAt(parentObject, jPath.Top.Name);
+                    {
+                        //special logic to cope with root objects that are arrays rather than nodes...
+                        if (jPath.Top.Name == string.Empty)
+                        {
+                            if (_root is not JsonArray)
+                                _root = new JsonArray();
+                        }
+                        else
+                            EnsureContainerHasArrayAt(parentObject, jPath.Top.Name);
+                    }
                     else
                         EnsureContainerHasObjectAt(parentObject, jPath.Top.Name);
 
@@ -224,8 +266,6 @@ public class JObjectBuilder
         }
 
         throw new InvalidOperationException("Nesting too deep");
-
-        return this;
     }
 
 
@@ -233,19 +273,32 @@ public class JObjectBuilder
     {
         var objs = _root as JsonObject;
         var vBuilder = ObjectToJsonNode(value);
+        objs.Remove(matchRemaining.Top.Name);
         objs.Add(matchRemaining.Top.Name, vBuilder);
         return new JObjectBuilder(vBuilder);
     }
 
+    /// <summary>
+    ///     Converts an object to a JsonNode
+    /// </summary>
+    /// <remarks>
+    ///     This method deliberately creates an independent clone of
+    ///     the supplied object.  It can also cope with JObjectBuilder being provided
+    /// </remarks>
+    /// <param name="obj"></param>
+    /// <returns></returns>
     private static JsonNode ObjectToJsonNode(object obj)
     {
-        var txt = JsonSerializer.Serialize(obj);
+        var txt = obj is JObjectBuilder builder
+            ? builder.Serialize()
+            : JsonSerializer.Serialize(obj);
+
         var tree = JsonNode.Parse(txt);
         return tree;
     }
 
-    public string Serialize() =>
-        _root.ToJsonString(new JsonSerializerOptions
+    public string Serialize()
+        => _root.ToJsonString(new JsonSerializerOptions
         {
             WriteIndented = true, TypeInfoResolver = new DefaultJsonTypeInfoResolver()
         });
@@ -264,7 +317,7 @@ public class JObjectBuilder
     ///     Use with care - the contents of the node may change unpredictably
     ///     if the builder continues to be used
     /// </remarks>
-    public JsonNode ReferenceNode() => _root;
+    private JsonNode ReferenceNode() => _root;
 
     /// <summary>
     ///     Returns a clone of the current contents of the builder
@@ -272,11 +325,44 @@ public class JObjectBuilder
     /// <remarks>
     ///     It's safe to use this since it can't change
     /// </remarks>
-    public JsonNode CloneNode() => JsonNode.Parse(Serialize());
+    private JsonNode CloneNode() => JsonNode.Parse(Serialize());
 
     /// <summary>
     ///     Returns a clone of the current builder
     /// </summary>
     /// <returns></returns>
     public JObjectBuilder Clone() => new(CloneNode());
+
+    /// <summary>
+    ///     Copies a node and all descendants from one location to another
+    /// </summary>
+    public JObjectBuilder Copy(string source, string dest)
+    {
+        var src = Search(source);
+        if (src.Match != MatchType.Object)
+            return this;
+        var obj = src.ResultOrParent.CloneNode();
+        Set(dest, obj);
+        return this;
+    }
+
+    /// <summary>
+    ///     Moves a node and all descendants from one location to another
+    /// </summary>
+    public JObjectBuilder Move(string source, string dest)
+    {
+        Copy(source, dest);
+        Remove(source);
+        return this;
+    }
+
+    /// <summary>
+    ///     Returns the current contents of the builder as a JsonNode
+    /// </summary>
+    /// <remarks>
+    ///     This is a snapshot of the current state and will be unaffected
+    ///     by subsequent operations
+    /// </remarks>
+    /// <returns></returns>
+    public JsonNode ToJsonNode() => CloneNode();
 }
