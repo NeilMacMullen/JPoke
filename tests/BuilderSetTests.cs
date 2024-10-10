@@ -1,3 +1,4 @@
+using FluentAssertions;
 using JPoke;
 
 namespace JPokeTests;
@@ -331,5 +332,28 @@ public class BuilderSetTests : TestHelpers
             }
         };
         Check(b, expected);
+    }
+
+    [TestMethod]
+    public void SimpleElementCanBeUpdated()
+    {
+        var b = JObjectBuilder.CreateEmpty();
+        b.Set("abc", 123);
+
+        var expected = new
+        {
+            abc = 123
+        };
+        Check(b, expected);
+
+        var c = b.Set("abc", 456);
+        c.Should().Be(b);
+        var expected2 = new
+        {
+            abc = 456
+        };
+        Check(c, expected2);
+
+
     }
 }
