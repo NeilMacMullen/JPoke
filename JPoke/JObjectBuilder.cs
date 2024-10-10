@@ -219,7 +219,15 @@ public class JObjectBuilder
                             arr.Add(o);
                         }
                         else
-                            parent._root = o;
+                        {
+                            //root object - replace the whole thing
+                            if (parent._root.Parent == null)
+                            {
+                                parent._root = o;
+                            }
+
+                            parent._root.ReplaceWith(o);
+                        }
                     }
 
                     //success
